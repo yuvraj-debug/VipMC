@@ -519,3 +519,4 @@ client.once("ready", () => {
 client.login(process.env.TOKEN).catch(err => {
   console.error("Failed to login. Did you set TOKEN in .env?", err);
 });
+
