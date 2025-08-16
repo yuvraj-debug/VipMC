@@ -1,43 +1,28 @@
 /**
- * index.js
  * Full ticket bot - single file (discord.js v14)
  * - !ticket panel (editable banner)
- * - dropdown categories: 📬 SUPPORT, 💵 BILLINGS
+ * - dropdown categories: 📬 SUPPORT (mailbox), 💵 BILLINGS
  * - Creates ticket channel in Tickets category (auto-create) or parent category set by !ticketcategory
  * - Buttons: Lock, Unlock, Claim (adds ✅ prefix), Delete (modal reason), Delete & Transcript (modal reason)
  * - Transcript HTML generated and optionally uploaded to transcripts channel
  * - Admin commands: !ticketcategory #channel, !setstaff @role, !settranscripts #channel, !setbanner <url>
- * - Render-ready (express keep-alive) - TOKEN in .env
+ * - Render-ready (express keep alive) - TOKEN in .env
  */
 
 require("dotenv").config();
 
+const { Client, GatewayIntentBits, Partials, ChannelType, PermissionsBitField,
+  EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
+  AttachmentBuilder, PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const express = require("express");
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ChannelType,
-  PermissionsBitField,
-  PermissionFlagsBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  AttachmentBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle
-} = require("discord.js");
 
-// ========== Keep-alive (Render) ==========
+// Keep-alive (Render)
 const app = express();
 app.get("/", (_req, res) => res.send("Ticket bot is alive"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-// ========== Client ==========
+// Client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -49,7 +34,7 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember]
 });
 
-// ========== In-memory config (non-persistent) ==========
+// In-memory config (non-persistent)
 const config = {
   ticketCategoryId: null,      // parent category id (if admin sets with !ticketcategory)
   staffRoleId: null,           // staff role id (set with !setstaff)
@@ -63,7 +48,11 @@ const tickets = {};
 let ticketCounter = 1;
 
 // Colors & emoji
-const COLORS = { panel: 0xFF5050, ticketHeader: 0x2B2D31, accent: 0xFF6B6B };
+const COLORS = {
+  panel: 0xFF5050,   // red panel (requested)
+  ticketHeader: 0x2B2D31,
+  accent: 0xFF6B6B
+};
 const EMOJI = {
   support: "📬",
   billings: "💵",
@@ -74,16 +63,15 @@ const EMOJI = {
   transcript: "🧾"
 };
 
-// ========== Utility builders ==========
-
+// Utility: Build the ticket panel embed (improved UI)
 function buildPanelEmbed(guild) {
   const embed = new EmbedBuilder()
     .setColor(COLORS.panel)
     .setAuthor({ name: `${guild.name} • Support`, iconURL: guild.iconURL({ size: 128 }) ?? undefined })
-    .setTitle("Open a Ticket")
-    .setDescription(`Select a category from the menu below to open a private support ticket. Our staff will respond as soon as possible.`)
+    .setTitle("Click to open a ticket")
+    .setDescription(`**${guild.name} • Tickets**\n\nSelect a category from the menu below to open a private support ticket. Our staff will respond as soon as possible.`)
     .addFields(
-      { name: "How to create a ticket", value: "`1.` Choose the correct category\n`2.` Answer follow-up questions (if any)\n`3.` Wait for staff to respond", inline: false },
+      { name: "How to create a ticket", value: "`1.` Choose the correct category\n`2.` Answer any follow-up questions\n`3.` Wait for staff to help you", inline: false },
       { name: "Rules", value: "Don't open multiple tickets for the same issue. Abuse may lead to punishment.", inline: false }
     )
     .setFooter({ text: "Support • Select a category to start" })
@@ -93,6 +81,7 @@ function buildPanelEmbed(guild) {
   return embed;
 }
 
+// Build the category select menu
 function buildPanelComponents() {
   const select = new StringSelectMenuBuilder()
     .setCustomId("ticket_select")
@@ -114,6 +103,7 @@ function buildPanelComponents() {
   return [ new ActionRowBuilder().addComponents(select) ];
 }
 
+// Build ticket control buttons
 function buildTicketButtons(isLocked = false, isClaimed = false) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("ticket_lock").setLabel("Lock").setStyle(ButtonStyle.Primary).setEmoji(EMOJI.lock).setDisabled(isLocked),
@@ -127,6 +117,7 @@ function buildTicketButtons(isLocked = false, isClaimed = false) {
   return [row1, row2];
 }
 
+// Ticket header embed for ticket channels (red themed)
 function buildTicketHeaderEmbed(ticketName, opener, categoryLabel) {
   return new EmbedBuilder()
     .setColor(COLORS.panel)
@@ -139,6 +130,7 @@ function buildTicketHeaderEmbed(ticketName, opener, categoryLabel) {
     .setTimestamp();
 }
 
+// Closed DM embed
 function buildClosedDMEmbed({ guild, ticketId, opener, closedBy, claimedBy, reason, openTime, transcriptUrl }) {
   const embed = new EmbedBuilder()
     .setAuthor({ name: guild.name, iconURL: guild.iconURL({ size: 128 }) ?? undefined })
@@ -164,7 +156,7 @@ function buildClosedDMEmbed({ guild, ticketId, opener, closedBy, claimedBy, reas
   return { embed, components };
 }
 
-// Convert messages to HTML transcript buffer
+// Convert messages to a simple HTML transcript (Buffer)
 function messagesToHTML(transcriptTitle, messages) {
   const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const rows = messages.map(m => {
@@ -182,7 +174,7 @@ function messagesToHTML(transcriptTitle, messages) {
   return Buffer.from(html, "utf-8");
 }
 
-// Fetch messages (up to cap)
+// Fetch all messages (up to large cap)
 async function fetchAllMessages(channel) {
   const collected = [];
   try {
@@ -205,14 +197,17 @@ async function fetchAllMessages(channel) {
 
 // Ensure Tickets category exists; returns category id
 async function ensureTicketsCategory(guild) {
+  // If admin set a ticketCategoryId use that
   if (config.ticketCategoryId) {
     const cat = guild.channels.cache.get(config.ticketCategoryId);
     if (cat && cat.type === ChannelType.GuildCategory) return config.ticketCategoryId;
   }
 
+  // Look for an existing category named "Tickets" (case-insensitive)
   const existing = guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name.toLowerCase().includes("ticket"));
   if (existing) return existing.id;
 
+  // Else create one
   try {
     const created = await guild.channels.create({ name: "Tickets", type: ChannelType.GuildCategory });
     return created.id;
@@ -222,7 +217,7 @@ async function ensureTicketsCategory(guild) {
   }
 }
 
-// ========== Message (prefix) commands ==========
+// Handle prefix commands
 client.on("messageCreate", async (message) => {
   if (!message.guild || message.author.bot) return;
   if (!message.content.startsWith(config.prefix)) return;
@@ -278,7 +273,7 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// ========== Interactions (selects, buttons, modals) ==========
+// Interaction handler (select menu, buttons, modals)
 client.on("interactionCreate", async (interaction) => {
   try {
     // Select menu: create ticket
@@ -288,7 +283,7 @@ client.on("interactionCreate", async (interaction) => {
       const opener = interaction.user;
       const guild = interaction.guild;
 
-      // Prevent user from creating multiple tickets
+      // Prevent user from creating multiple tickets (optional)
       const existing = Object.entries(tickets).find(([cId, data]) => data.openerId === opener.id);
       if (existing) {
         return interaction.reply({ content: `You already have an open ticket: <#${existing[0]}>`, ephemeral: true });
@@ -363,6 +358,7 @@ client.on("interactionCreate", async (interaction) => {
 
       // LOCK
       if (customId === "ticket_lock" && ticketData) {
+        // Permission check: staff or admin
         const isStaff = config.staffRoleId && interaction.member.roles.cache.has(config.staffRoleId);
         const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
         if (!(isStaff || isAdmin)) return interaction.reply({ content: "Only staff can lock tickets.", ephemeral: true });
@@ -402,6 +398,7 @@ client.on("interactionCreate", async (interaction) => {
         if (ticketData.claimedBy) return interaction.reply({ content: `Already claimed by <@${ticketData.claimedBy}>.`, ephemeral: true });
 
         ticketData.claimedBy = interaction.user.id;
+        // Rename channel to include ✅ if not already present
         let newName = channel.name;
         if (!newName.startsWith(`${EMOJI.claim} `)) {
           try { newName = `${EMOJI.claim} ${newName}`; await channel.setName(newName).catch(() => {}); } catch(e) {}
@@ -419,14 +416,15 @@ client.on("interactionCreate", async (interaction) => {
         const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
         if (!(isStaff || isAdmin)) return interaction.reply({ content: "Only staff can close/delete tickets.", ephemeral: true });
 
+        // Show modal. Use customId to denote whether transcript is requested
         const wantTranscript = customId === "ticket_delete_transcript";
         const modal = new ModalBuilder()
           .setCustomId(wantTranscript ? "close_modal:trans" : "close_modal:notrans")
-          .setTitle("Reason for closing ticket");
+          .setTitle("Reason");
 
         const reasonInput = new TextInputBuilder()
           .setCustomId("close_reason")
-          .setLabel("Please provide a reason to close the ticket (optional)")
+          .setLabel("Please provide a reason to close a ticket")
           .setStyle(TextInputStyle.Paragraph)
           .setPlaceholder("E.g. Issue resolved / Duplicate / Abusive behavior")
           .setRequired(false)
@@ -453,7 +451,7 @@ client.on("interactionCreate", async (interaction) => {
       // Acknowledge modal
       await interaction.reply({ content: "Closing ticket... processing.", ephemeral: true });
 
-      // Build transcript if requested and transcripts channel set
+      // Build transcript if requested
       let transcriptUrl = null;
       if (withTranscript && config.transcriptsChannelId) {
         try {
@@ -462,7 +460,7 @@ client.on("interactionCreate", async (interaction) => {
           const attachment = new AttachmentBuilder(htmlBuffer, { name: `${channel.name}-transcript.html` });
 
           const transcriptsCh = await interaction.guild.channels.fetch(config.transcriptsChannelId).catch(() => null);
-          if (transcriptsCh && transcriptsCh.isTextBased && transcriptsCh.isTextBased()) {
+          if (transcriptsCh && transcriptsCh.isTextBased()) {
             const sent = await transcriptsCh.send({ content: `Transcript for ${channel} • Opened by <@${ticketData.openerId}>`, files: [attachment] });
             const att = sent.attachments.first();
             if (att) transcriptUrl = att.url;
@@ -472,9 +470,11 @@ client.on("interactionCreate", async (interaction) => {
         }
       }
 
-      // DM the opener if possible
+      // DM the opener
       let openerUser = null;
-      try { openerUser = await client.users.fetch(ticketData.openerId); } catch (e) { openerUser = null; }
+      try {
+        openerUser = await client.users.fetch(ticketData.openerId);
+      } catch (e) { openerUser = null; }
 
       if (openerUser) {
         const { embed, components } = buildClosedDMEmbed({
@@ -488,7 +488,11 @@ client.on("interactionCreate", async (interaction) => {
           transcriptUrl
         });
 
-        try { await openerUser.send({ embeds: [embed], components }).catch(() => {}); } catch (e) { console.warn("Failed to DM opener:", e); }
+        try {
+          await openerUser.send({ embeds: [embed], components }).catch(() => {});
+        } catch (e) {
+          console.warn("Failed to DM opener:", e);
+        }
       }
 
       // Announce & delete channel
@@ -511,12 +515,9 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// ========== Ready & Login ==========
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-client.login(process.env.TOKEN).catch(err => {
-  console.error("Failed to login. Did you set TOKEN in .env?", err);
-});
-
+// Login to Discord
+client.login(process.env.TOKEN);
